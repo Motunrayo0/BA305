@@ -6,22 +6,21 @@ from xgboost import XGBRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 
-# -----------------------------
-# 1. CONFIG
-# -----------------------------
-DATA_PATH = "rideshare_demand_final.csv"  # <- change name if your file is called something else
 
+# 1. CONFIG
+
+DATA_PATH = "rideshare_demand_final.csv"  
 st.set_page_config(
     page_title="Rideshare Driver Helper",
     page_icon="🚗",
     layout="centered"
 )
 
-st.title("🚗 Where Should a Driver Go Next?")
+st.title("Where Should a Driver Go Next?")
 st.write(
-    "This app uses an XGBoost model trained on your aggregated Uber/Lyft data "
-    "to predict **average price** in different areas.\n\n"
-    "Higher predicted price ≈ higher demand → better place for a driver to wait."
+    "This app now uses an XGBoost model to predict **demand** (how many rides are requested and price) "
+    "in different areas, given the time and conditions.\n\n"
+    "Higher predicted demand → Where driver should be place to wait."
 )
 
 # -----------------------------
@@ -36,12 +35,12 @@ def load_data(path):
 
     st.write("Columns in CSV:", df.columns.tolist())
 
-    if "avg_price" not in df.columns:
-        st.error("I couldn't find an 'avg_price' column in your CSV.")
+    if "demand" not in df.columns:
+        st.error("I couldn't find a 'demand' column in your CSV.")
         st.stop()
 
-    # Drop rows with missing avg_price
-    df = df[df["avg_price"].notna()].copy()
+    # Drop rows with missing demand
+    df = df[df["demand"].notna()].copy()
 
     return df
 
@@ -54,16 +53,16 @@ except FileNotFoundError:
     )
     st.stop()
 
-# -----------------------------
+
 # 3. BASIC CHECKS & SETUP
-# -----------------------------
+
 # Identify src_* columns = locations
 src_cols = [c for c in df.columns if c.startswith("src_")]
 if not src_cols:
     st.error("I couldn't find any columns starting with 'src_' (location indicators).")
     st.stop()
 
-required_cols = ["month", "day", "hour", "weekday", "is_weekend", "avg_price"]
+required_cols = ["month", "day", "hour", "weekday", "is_weekend", "demand"]
 missing = [c for c in required_cols if c not in df.columns]
 if missing:
     st.error(f"Missing required column(s): {missing}")
@@ -76,16 +75,19 @@ if len(df) > max_rows:
 else:
     df_sample = df.copy()
 
-# -----------------------------
-# 4. TRAIN MODEL (XGBoost)
-# -----------------------------
+
+# 4. TRAIN MODEL (XGBoost, TARGET = DEMAND)
+
 @st.cache_resource
 def train_model(df_sample):
-    # Target is avg_price
-    y = df_sample["avg_price"]
+    # Target = demand
+    y = df_sample["demand"]
 
-    # Features: all except avg_price
-    feature_cols = [c for c in df_sample.columns if c != "avg_price"]
+    # Features: all except demand and avg_price (to avoid using price to predict demand)
+    feature_cols = [
+        c for c in df_sample.columns
+        if c not in ["demand", "avg_price"]
+    ]
     X = df_sample[feature_cols]
 
     model = XGBRegressor(
@@ -112,12 +114,10 @@ def train_model(df_sample):
 
     return pipe, feature_cols
 
-with st.spinner("Training XGBoost model..."):
+with st.spinner("Training XGBoost model (target = demand)..."):
     model, feature_cols = train_model(df_sample)
 
-# -----------------------------
-# 5. SIDEBAR INPUTS
-# -----------------------------
+
 st.sidebar.header("Driver Settings")
 
 # Month options from data
@@ -139,7 +139,7 @@ weekday = st.sidebar.selectbox("Weekday (0=Mon ... 6=Sun)", weekday_vals)
 is_weekend = 1 if weekday in [5, 6] else 0
 st.sidebar.write(f"`is_weekend` will be set to: **{is_weekend}**")
 
-# (Optional) weather “scenario” knobs – simple sliders
+# Weather “scenario” knobs – simple sliders
 avg_temperature = st.sidebar.slider(
     "Temperature (°F)", 
     float(df_sample["avg_temperature"].min()),
@@ -152,6 +152,13 @@ avg_precip_intensity = st.sidebar.slider(
     float(df_sample["avg_precip_intensity"].min()),
     float(df_sample["avg_precip_intensity"].max()),
     float(df_sample["avg_precip_intensity"].median())
+)
+
+st.write("### Step 1: You choose time & conditions in the sidebar.")
+st.write(
+    f"You chose **month {month}**, **day {day}**, **hour {hour}**, "
+    f"weekday = **{weekday}**, weekend flag = **{is_weekend}**, "
+    f"temperature ≈ **{avg_temperature:.1f}°F**."
 )
 
 # -----------------------------
@@ -181,22 +188,13 @@ if not candidate_areas:
     st.error("None of the expected src_ location columns were found in the dataset.")
     st.stop()
 
-st.write("### Step 1: You choose time & conditions in the sidebar.")
-st.write(
-    f"You chose **month {month}**, **day {day}**, **hour {hour}**, "
-    f"weekday = **{weekday}**, weekend flag = **{is_weekend}**, "
-    f"temperature ≈ **{avg_temperature:.1f}°F**."
-)
-
 # Use medians for all non-location, non-target columns by default
 median_vals = df_sample.median(numeric_only=True)
 
-# Build candidate input DataFrame
 rows = []
 for area_name, src_col in candidate_areas.items():
     row = {}
 
-    # Start with medians for all features
     for col in feature_cols:
         if col == "month":
             row[col] = month
@@ -213,46 +211,43 @@ for area_name, src_col in candidate_areas.items():
         elif col == "avg_precip_intensity":
             row[col] = avg_precip_intensity
         elif col in src_cols:
-            # All src_* start as 0; we set the chosen one below
-            row[col] = 0
+            row[col] = 0  # all areas off by default
         else:
             # Fallback: use median if available, else 0
             row[col] = float(median_vals.get(col, 0.0))
 
-    # Turn on this area's src_* column
+    
     row[src_col] = 1
 
-    row["__area_name"] = area_name  # keep readable label
+    row["__area_name"] = area_name
     rows.append(row)
 
 X_candidates = pd.DataFrame(rows)
 
-# Separate out label column
 area_labels = X_candidates["__area_name"].values
 X_candidates_model = X_candidates.drop(columns=["__area_name"])
 
-# -----------------------------
-# 7. PREDICT & DISPLAY RESULTS
-# -----------------------------
-predicted_prices = model.predict(X_candidates_model)
+
+predicted_demand = model.predict(X_candidates_model)
 
 results_df = pd.DataFrame({
     "Area": area_labels,
-    "Predicted avg price ($)": predicted_prices
-}).sort_values(by="Predicted avg price ($)", ascending=False)
+    "Predicted demand (relative units)": predicted_demand
+}).sort_values(by="Predicted demand (relative units)", ascending=False)
 
 best_row = results_df.iloc[0]
 
-st.write("### Step 2: Predicted average price by area")
+st.write("### Step 2: Predicted demand by area")
 st.dataframe(results_df, hide_index=True)
 
-st.write("### Step 3: Recommended spot for the driver")
+st.write("### Step 3: Recommended spot for the driver (highest predicted demand)")
 st.success(
-    f"📍 **Recommended area:** `{best_row['Area']}`  \n"
-    f"💲 **Predicted average price:** **${best_row['Predicted avg price ($)']:.2f}**  \n\n"
-    "Given your selected time and conditions, this area has the highest predicted average price."
+    f"**Recommended area:** `{best_row['Area']}`  \n"
+    f"**Predicted demand:** **{best_row['Predicted demand (relative units)']:.2f}**  \n\n"
+    "Given your selected time and conditions, this area has the highest predicted demand."
 )
 
-st.write("### Price comparison by area")
-chart_df = results_df.set_index("Area")["Predicted avg price ($)"]
+st.write("### Demand comparison by area")
+chart_df = results_df.set_index("Area")["Predicted demand (relative units)"]
 st.bar_chart(chart_df)
+

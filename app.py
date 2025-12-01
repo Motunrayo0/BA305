@@ -12,7 +12,6 @@ from sklearn.pipeline import Pipeline
 DATA_PATH = "rideshare_demand_final.csv"  
 st.set_page_config(
     page_title="Rideshare Driver Helper",
-    page_icon="🚗",
     layout="centered"
 )
 
@@ -23,9 +22,9 @@ st.write(
     "Higher predicted demand → Where driver should be place to wait."
 )
 
-# -----------------------------
-# 2. LOAD & PREP DATA
-# -----------------------------
+
+#2. LOAD & PREP DATA
+
 @st.cache_data
 def load_data(path):
     df = pd.read_csv(path)
@@ -54,7 +53,7 @@ except FileNotFoundError:
     st.stop()
 
 
-# 3. BASIC CHECKS & SETUP
+
 
 # Identify src_* columns = locations
 src_cols = [c for c in df.columns if c.startswith("src_")]
@@ -161,9 +160,13 @@ st.write(
     f"temperature ≈ **{avg_temperature:.1f}°F**."
 )
 
-# -----------------------------
+car_type = st.sidebar.selectbox(
+    "Preferred Ride Type",
+    ["Any", "Standard", "Shared", "XL", "Special"]
+) 
+
 # 6. BUILD CANDIDATE ROWS (ONE PER AREA)
-# -----------------------------
+
 # Map human-readable area names to src_ columns
 area_map = {
     "Beacon Hill": "src_beacon_hill",
@@ -188,66 +191,74 @@ if not candidate_areas:
     st.error("None of the expected src_ location columns were found in the dataset.")
     st.stop()
 
-# Use medians for all non-location, non-target columns by default
-median_vals = df_sample.median(numeric_only=True)
 
-rows = []
+
+
+
+
+
+# 7. PREDICT DEMAND 
+
+
+# Map selection to dataset column
+car_type_map = {
+    "Any": None,
+    "Standard": "prop_standard",
+    "Shared": "prop_shared",
+    "XL": "prop_xl",
+    "Special": "prop_special"
+}
+selected_car_col = car_type_map[car_type]
+
+results = []
+
 for area_name, src_col in candidate_areas.items():
-    row = {}
 
-    for col in feature_cols:
-        if col == "month":
-            row[col] = month
-        elif col == "day":
-            row[col] = day
-        elif col == "hour":
-            row[col] = hour
-        elif col == "weekday":
-            row[col] = weekday
-        elif col == "is_weekend":
-            row[col] = is_weekend
-        elif col == "avg_temperature":
-            row[col] = avg_temperature
-        elif col == "avg_precip_intensity":
-            row[col] = avg_precip_intensity
-        elif col in src_cols:
-            row[col] = 0  # all areas off by default
-        else:
-            # Fallback: use median if available, else 0
-            row[col] = float(median_vals.get(col, 0.0))
+    # real rows for this area
+    area_df = df_sample[df_sample[src_col] == 1].copy()
 
-    
-    row[src_col] = 1
+    # best match rows by hour & weekday
+    filtered = area_df[
+        (area_df["hour"] == hour) &
+        (area_df["weekday"] == weekday)
+    ]
+    if len(filtered) == 0:
+        filtered = area_df.copy()
 
-    row["__area_name"] = area_name
-    rows.append(row)
+    # model demand prediction
+    X_input = filtered[feature_cols]
+    preds = model.predict(X_input)
+    mean_pred = preds.mean()
 
-X_candidates = pd.DataFrame(rows)
+    # car-type preference if selected
+    if selected_car_col:
+        avg_prop = filtered[selected_car_col].mean()
+        demand_score = mean_pred * (1 + avg_prop * 0.5)  # need to tune this factor as to not over power demand by car type. 
+    else:
+        demand_score = mean_pred
 
-area_labels = X_candidates["__area_name"].values
-X_candidates_model = X_candidates.drop(columns=["__area_name"])
+    results.append({
+        "Area": area_name,
+        "Demand Score": demand_score
+    })
 
-
-predicted_demand = model.predict(X_candidates_model)
-
-results_df = pd.DataFrame({
-    "Area": area_labels,
-    "Predicted demand (relative units)": predicted_demand
-}).sort_values(by="Predicted demand (relative units)", ascending=False)
+# Sort by the demand score
+results_df = pd.DataFrame(results).sort_values(
+    by="Demand Score", ascending=False
+)
 
 best_row = results_df.iloc[0]
 
 st.write("### Step 2: Predicted demand by area")
 st.dataframe(results_df, hide_index=True)
 
-st.write("### Step 3: Recommended spot for the driver (highest predicted demand)")
+st.write("### Step 3: Best area based on demand")
 st.success(
-    f"**Recommended area:** `{best_row['Area']}`  \n"
-    f"**Predicted demand:** **{best_row['Predicted demand (relative units)']:.2f}**  \n\n"
-    "Given your selected time and conditions, this area has the highest predicted demand."
+    f"📍 **Recommended area:** `{best_row['Area']}`  \n"
+    f"📊 **Demand score:** **{best_row['Demand Score']:.2f}**"
 )
 
-st.write("### Demand comparison by area")
-chart_df = results_df.set_index("Area")["Predicted demand (relative units)"]
+chart_df = results_df.set_index("Area")["Demand Score"]
 st.bar_chart(chart_df)
+
 
